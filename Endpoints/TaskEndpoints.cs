@@ -12,22 +12,52 @@ public static class TaskEndpoints
         var group = app.MapGroup("/api/tasks").WithTags("Tasks");
 
         group.MapGet("/", (ITaskRepository repository) =>
-            Results.Ok(repository.GetAll()))
+        {
+            try
+            {
+                return Results.Ok(repository.GetAll());
+            }
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
+        })
             .WithName("GetTasks")
             .WithSummary("List all tasks");
 
         group.MapGet("/overdue", (ITaskRepository repository) =>
-            Results.Ok(repository.GetAll().Where(task => task.IsOverdue)))
+        {
+            try
+            {
+                return Results.Ok(repository.GetAll().Where(task => task.IsOverdue));
+            }
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
+        })
             .WithName("GetOverdueTasks")
             .WithSummary("List overdue tasks");
 
         group.MapGet("/{id:int}", (int id, ITaskRepository repository) =>
         {
-            var task = repository.GetById(id);
+            if (id <= 0)
+            {
+                return BadRequest("Task id must be greater than zero.");
+            }
 
-            return task is null
-                ? Results.NotFound(new { message = $"Task {id} was not found." })
-                : Results.Ok(task);
+            try
+            {
+                var task = repository.GetById(id);
+
+                return task is null
+                    ? NotFound(id)
+                    : Results.Ok(task);
+            }
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
         })
         .WithName("GetTaskById")
         .WithSummary("Get one task");
@@ -39,68 +69,105 @@ public static class TaskEndpoints
             ConsoleNotifier consoleNotifier,
             CompletionNotifier completionNotifier) =>
         {
-            if (string.IsNullOrWhiteSpace(request.Title))
+            try
             {
-                return Results.BadRequest(new { message = "Title is required." });
+                if (string.IsNullOrWhiteSpace(request.Title))
+                {
+                    return BadRequest("Title is required.");
+                }
+
+                var task = new TeamTask
+                {
+                    Title = request.Title,
+                    Description = request.Description,
+                    DueDate = request.DueDate
+                };
+
+                if (!string.IsNullOrWhiteSpace(request.AssignedTo))
+                {
+                    task.Assign(request.AssignedTo);
+                }
+
+                SubscribeStatusNotifiers(task, auditNotifier, consoleNotifier, completionNotifier);
+
+                var created = repository.Add(task);
+
+                return Results.Created($"/api/tasks/{created.Id}", created);
             }
-
-            var task = new TeamTask
+            catch (ArgumentException exception)
             {
-                Title = request.Title,
-                Description = request.Description,
-                DueDate = request.DueDate
-            };
-
-            if (!string.IsNullOrWhiteSpace(request.AssignedTo))
-            {
-                task.Assign(request.AssignedTo);
+                return BadRequest(exception.Message);
             }
-
-            SubscribeStatusNotifiers(task, auditNotifier, consoleNotifier, completionNotifier);
-
-            var created = repository.Add(task);
-
-            return Results.Created($"/api/tasks/{created.Id}", created);
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
         })
         .WithName("CreateTask")
         .WithSummary("Create a task");
 
         group.MapPatch("/{id:int}/assign", (int id, AssignRequest request, ITaskRepository repository) =>
         {
-            if (repository.GetById(id) is not IAssignable assignable)
+            if (id <= 0)
             {
-                return Results.NotFound(new { message = $"Task {id} was not found." });
+                return BadRequest("Task id must be greater than zero.");
             }
 
             try
             {
+                if (repository.GetById(id) is not IAssignable assignable)
+                {
+                    return NotFound(id);
+                }
+
                 assignable.Assign(request.User);
+
+                return Results.NoContent();
             }
             catch (ArgumentException exception)
             {
-                return Results.BadRequest(new { message = exception.Message });
+                return BadRequest(exception.Message);
             }
-
-            return Results.NoContent();
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
         })
         .WithName("AssignTask")
         .WithSummary("Assign a task");
 
         group.MapPatch("/{id:int}/status", (int id, TransitionRequest request, ITaskRepository repository) =>
         {
-            if (repository.GetById(id) is not ITransitionable transitionable)
+            if (id <= 0)
             {
-                return Results.NotFound(new { message = $"Task {id} was not found." });
+                return BadRequest("Task id must be greater than zero.");
             }
 
-            if (transitionable.Status == request.NewStatus)
+            if (!Enum.IsDefined(request.NewStatus))
             {
-                return Results.BadRequest(new { message = $"Task is already {request.NewStatus}." });
+                return BadRequest($"'{request.NewStatus}' is not a valid task status.");
             }
 
-            transitionable.Transition(request.NewStatus);
+            try
+            {
+                if (repository.GetById(id) is not ITransitionable transitionable)
+                {
+                    return NotFound(id);
+                }
 
-            return Results.NoContent();
+                if (transitionable.Status == request.NewStatus)
+                {
+                    return BadRequest($"Task is already {request.NewStatus}.");
+                }
+
+                transitionable.Transition(request.NewStatus);
+
+                return Results.NoContent();
+            }
+            catch (Exception exception)
+            {
+                return ServerError(exception);
+            }
         })
         .WithName("TransitionTask")
         .WithSummary("Transition a task status");
@@ -117,5 +184,23 @@ public static class TaskEndpoints
         task.StatusChanged += (_, args) => auditNotifier.Notify(args);
         task.StatusChanged += (_, args) => consoleNotifier.Notify(args);
         task.StatusChanged += (_, args) => completionNotifier.Notify(args);
+    }
+
+    private static IResult BadRequest(string message)
+    {
+        return Results.BadRequest(new { message });
+    }
+
+    private static IResult NotFound(int id)
+    {
+        return Results.NotFound(new { message = $"Task {id} was not found." });
+    }
+
+    private static IResult ServerError(Exception exception)
+    {
+        return Results.Problem(
+            title: "Something went wrong while processing the request.",
+            detail: exception.Message,
+            statusCode: StatusCodes.Status500InternalServerError);
     }
 }
