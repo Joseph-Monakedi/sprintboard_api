@@ -4,16 +4,21 @@ namespace SprintboardApi.Services;
 
 public sealed class AuditLogger
 {
+    private readonly object _logLock = new();
+
     public List<string> Log { get; } = [];
 
     public void HandleStatusChanged(object? sender, TaskStatusChangedArgs args)
     {
-        Log.Add(FormatEntry(args));
+        LogStatusChange(args);
     }
 
     public void LogStatusChange(TaskStatusChangedArgs args)
     {
-        Log.Add(FormatEntry(args));
+        lock (_logLock)
+        {
+            Log.Add(FormatEntry(args));
+        }
     }
 
     private static string FormatEntry(TaskStatusChangedArgs args)
